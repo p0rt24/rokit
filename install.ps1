@@ -13,7 +13,30 @@ function Get-ReleaseInfo {
     catch { throw "Failed to fetch release info: $_" }
 }
 
-# Читает актуальный PATH из реестра и применяет к текущей сессии
+function Add-RokitToPath {
+    param([string]$BinPath)
+
+    $regKey = 'HKCU:\Environment'
+
+    # Читаем сырое значение из реестра (там может быть %USERPROFILE% без развёртки)
+    $rawPath = (Get-ItemProperty -Path $regKey -Name 'PATH' -ErrorAction SilentlyContinue).PATH
+
+    # Развёртываем для проверки — есть ли путь уже
+    $expandedRaw = [Environment]::ExpandEnvironmentVariables($rawPath)
+
+    if ($expandedRaw -like "*$BinPath*") {
+        Write-Host "PATH уже содержит '$BinPath', пропускаем."
+        return
+    }
+
+    # Записываем обратно с правильным типом REG_EXPAND_SZ,
+    # чтобы %USERPROFILE% и другие переменные продолжали работать
+    $newPath = if ($rawPath) { "$rawPath;$BinPath" } else { $BinPath }
+    Set-ItemProperty -Path $regKey -Name 'PATH' -Value $newPath -Type ExpandString
+
+    Write-Host "Добавлен '$BinPath' в PATH пользователя (реестр)."
+}
+
 function Update-SessionPath {
     $machine = [Environment]::GetEnvironmentVariable('PATH', 'Machine')
     $user    = [Environment]::GetEnvironmentVariable('PATH', 'User')
@@ -36,35 +59,21 @@ try {
     Expand-Archive -Path rokit.zip -DestinationPath .\rokit -Force -ErrorAction Stop
 
     if (-not (Test-Path ".\rokit\rokit.exe")) {
-        throw "rokit.exe not found in the extracted directory"
+        throw "rokit.exe не найден в распакованной директории"
     }
 
     Write-Host "[3 / 3] Running $PROGRAM_NAME self-install`n"
     Start-Process -FilePath ".\rokit\rokit.exe" -ArgumentList "self-install" -Wait -NoNewWindow
 
-    # ── КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ ──────────────────────────────────────────────────
-    # self-install прописывает путь в реестр, но текущая сессия и новые сессии
-    # могут его не подхватить. Принудительно добавляем и обновляем.
-
-    $curUserPath = [Environment]::GetEnvironmentVariable('PATH', 'User')
-    if ($curUserPath -notlike "*$ROKIT_BIN*") {
-        [Environment]::SetEnvironmentVariable(
-            'PATH',
-            "$curUserPath;$ROKIT_BIN",
-            'User'
-        )
-        Write-Host "Added '$ROKIT_BIN' to user PATH"
-    }
-
-    # Применяем новый PATH к текущей сессии (без этого rokit не виден до перезапуска)
+    # Гарантируем правильную запись в реестр и обновляем текущую сессию
+    Add-RokitToPath -BinPath $ROKIT_BIN
     Update-SessionPath
-    # ─────────────────────────────────────────────────────────────────────────
 
     if (Get-Command rokit -ErrorAction SilentlyContinue) {
-        Write-Host "`n✓ rokit установлен и уже доступен в этой сессии!" -ForegroundColor Green
+        Write-Host "`n✓ rokit установлен успешно!" -ForegroundColor Green
         rokit --version
     } else {
-        Write-Warning "rokit не найден в PATH после установки. Перезапустите терминал."
+        Write-Warning "rokit не найден. Попробуйте перезапустить терминал."
     }
 }
 catch {
@@ -72,7 +81,7 @@ catch {
     exit 1
 }
 finally {
-    Remove-Item rokit.zip      -ErrorAction SilentlyContinue
+    Remove-Item rokit.zip -ErrorAction SilentlyContinue
     Remove-Item .\rokit -Recurse -ErrorAction SilentlyContinue
     Set-Location $originalPath
 }
